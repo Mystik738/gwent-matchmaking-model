@@ -4,6 +4,7 @@ import (
 	"encoding/csv"
 	"fmt"
 	"log"
+	"math"
 	"math/rand"
 	"os"
 	"strconv"
@@ -11,37 +12,65 @@ import (
 )
 
 const (
-	Derank    = false
+	//Substantial Model changes
+	Derank = false //Allows players to de-rank on losses. Currently disabled in the game, but was part of older ranking systems
+	Learn  = false //Allows players to learn as they play more games.
+
+	//Minor Model changes. Note that these are not linear variables, so the descriptions aren't quite accurate.
+	SkillOffsetScale = 100 //How many games we expect the average player to learn the game. Set at 100 due to MMR requiring 100 games (25 per 4 factions) to
+	LearnScale       = 2.0 //Allows some players to learn faster than others
+	LearnFactor      = 1.0 //Larger increases learning speed, but also increases the "just don't get it" factor for struggling players
+
+	//Procedural changes
 	Debug     = false
-	PlayerNum = 5000
-	GameNum   = 3000
+	PlayerNum = 25000
+	GameNum   = 2000 //Max, average will be half this
 )
 
 type Player struct {
 	Id                int
-	Skill             float32
 	Rank              int
 	Streak            int
 	Pieces            int
 	GamesLeft         int
 	GamesPlayed       int
 	FailedMatchMaking int
-	RankProgression   []RP
+	RankProgression   []RankProgression
+	Skill             Skill
 }
 
-type RP struct {
+type RankProgression struct {
 	Rank        int
 	GamesPlayed int
+}
+
+type Skill struct {
+	max    float32
+	offset int
+	rate   float32
+	calc   func(skill *Skill, gamesPlayed int) float32
+}
+
+func calcSkill(skill *Skill, gamesPlayed int) float32 {
+	if Learn {
+		return skill.max * float32(.5+math.Atan(float64(gamesPlayed+skill.offset)/float64(skill.rate))/math.Pi)
+	}
+	return skill.max
 }
 
 func NewPlayer(id int, skill float32, games int) Player {
 	player := Player{}
 	player.Id = id
-	player.Skill = skill
 	player.GamesLeft = games
 	player.Rank = 30
-	player.RankProgression = make([]RP, 1)
-	player.RankProgression[0] = RP{Rank: 30, GamesPlayed: 0}
+	player.RankProgression = make([]RankProgression, 1)
+	player.RankProgression[0] = RankProgression{Rank: 30, GamesPlayed: 0}
+
+	player.Skill = Skill{
+		max:    rand.Float32(),
+		offset: int((rand.Float32() - .5) * float32(SkillOffsetScale)),
+		rate:   float32(SkillOffsetScale / (1.0 + (rand.Float32() * (LearnScale - 1.0)))), //This looks complicated, but pins the learning rate to the skill offset rate
+		calc:   calcSkill}
 
 	return player
 }
@@ -208,17 +237,6 @@ func main() {
 	}
 
 	endStats(&players)
-	file, err := os.Create("results.csv")
-	checkError("Cannot create file", err)
-	defer file.Close()
-
-	writer := csv.NewWriter(file)
-	defer writer.Flush()
-
-	for _, player := range players {
-		err := writer.Write([]string{strconv.Itoa(player.GamesPlayed), fmt.Sprintf("%f", player.Skill), strconv.Itoa(player.Rank)})
-		checkError("Cannot write to file", err)
-	}
 }
 
 func endStats(p *[]Player) {
@@ -226,6 +244,28 @@ func endStats(p *[]Player) {
 	for i := 0; i < len(*p); i++ {
 		playersBR[(*p)[i].Rank] = append(playersBR[(*p)[i].Rank], i)
 	}
+
+	fileName := ""
+	if Derank {
+		fileName += "Derank"
+	} else {
+		fileName += "NoDerank"
+	}
+	if Learn {
+		fileName += "Learn"
+	} else {
+		fileName += "NoLearn"
+	}
+
+	file, err := os.Create(fileName + ".csv")
+	checkError("Cannot create file", err)
+	defer file.Close()
+
+	writer := csv.NewWriter(file)
+	defer writer.Flush()
+
+	err = writer.Write([]string{"Rank", "Player Count", "Average Games Played", "Average Skill", "Average Progression Count"})
+	checkError("Cannot write to file", err)
 
 	for r := 0; r < len(playersBR); r++ {
 		gp := 0
@@ -236,7 +276,8 @@ func endStats(p *[]Player) {
 
 		for i := 0; i < cnt; i++ {
 			gp += (*p)[playersBR[r][i]].GamesPlayed
-			skill += (*p)[playersBR[r][i]].Skill
+			pSkill := &(*p)[playersBR[r][i]].Skill
+			skill += (*p)[playersBR[r][i]].Skill.calc(pSkill, (*p)[playersBR[r][i]].GamesPlayed)
 		}
 
 		for rp := r - 1; rp >= 0; rp-- {
@@ -250,19 +291,24 @@ func endStats(p *[]Player) {
 		}
 
 		log.Println("Rank", r, ":", cnt, "|", gp/cnt, skill/(float32)(cnt), "|", (gp+gpAll)/(cnt+cntAll))
+
+		err := writer.Write([]string{strconv.Itoa(r), strconv.Itoa(cnt), fmt.Sprintf("%f", float32(gp)/float32(cnt)), fmt.Sprintf("%f", skill/(float32)(cnt)), fmt.Sprintf("%f", float32(gp+gpAll)/float32(cnt+cntAll))})
+		checkError("Cannot write to file", err)
 	}
 }
 
 func playMatch(a *Player, b *Player) (int, int) {
-	match := rand.Float32() * (a.Skill + b.Skill)
+	aSkill := &a.Skill
+	bSkill := &b.Skill
+	match := rand.Float32() * (a.Skill.calc(aSkill, a.GamesPlayed) + b.Skill.calc(bSkill, b.GamesPlayed))
 	aRankedUp := 0
 	bRankedUp := 0
 
 	matchOutcome := 0
 
-	if match < a.Skill {
+	if match < a.Skill.calc(aSkill, a.GamesPlayed) {
 		matchOutcome = -1
-	} else if match > a.Skill {
+	} else if match > a.Skill.calc(aSkill, a.GamesPlayed) {
 		matchOutcome = 1
 	}
 
@@ -305,7 +351,7 @@ func addWin(player *Player) (bool, int) {
 			player.Pieces -= 5
 			rankedUp = 1
 			if player.RankProgression[len(player.RankProgression)-1].Rank > player.Rank {
-				player.RankProgression = append(player.RankProgression, RP{Rank: player.Rank, GamesPlayed: player.GamesPlayed})
+				player.RankProgression = append(player.RankProgression, RankProgression{Rank: player.Rank, GamesPlayed: player.GamesPlayed})
 			}
 		}
 	}
