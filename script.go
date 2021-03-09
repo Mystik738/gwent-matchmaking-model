@@ -384,10 +384,11 @@ func addWin(player *Player) (bool, int) {
 	} else {
 		player.Pieces += 1
 	}
+	//This is a little strange. You need more than 5 pieces to rank up, but when you do you rank with 1 piece already.
 	if player.Pieces > 5 {
 		if player.Rank != 0 {
 			player.Rank--
-			player.Pieces -= 6
+			player.Pieces -= 5
 			rankedUp = 1
 			if player.RankProgression[len(player.RankProgression)-1].Rank > player.Rank {
 				player.RankProgression = append(player.RankProgression, RankProgression{Rank: player.Rank, GamesPlayed: player.GamesPlayed})
