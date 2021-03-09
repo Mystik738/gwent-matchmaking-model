@@ -136,21 +136,28 @@ func main() {
 				}
 			}
 
-			if aRank != 30 {
-				numMatched += len(playersWGBR[aRank+1])
-				playersIdBelow += len(playersWGBR[aRank+1])
+			//If there aren't any players in a's rank, add ranks above and below
+			if len(playersWGBR[aRank])-1 == 0 {
+				if aRank != 30 {
+					numMatched += len(playersWGBR[aRank+1])
+					playersIdBelow += len(playersWGBR[aRank+1])
+				}
+				if aRank != 0 {
+					numMatched += len(playersWGBR[aRank-1])
+				}
 			}
-			if aRank != 0 {
-				numMatched += len(playersWGBR[aRank-1])
-			}
+			//If we matched, find a player and play
 			if numMatched > 0 {
 				bRankedIndex := int(rand.Float32() * float32(numMatched))
-				bRank := aRank + 1
-				if aRank == 30 {
-					bRank--
-				} else if bRankedIndex >= len(playersWGBR[aRank+1]) {
-					bRank--
-					bRankedIndex -= len(playersWGBR[aRank+1])
+				bRank := aRank
+				if len(playersWGBR[aRank])-1 == 0 {
+					bRank = aRank + 1
+					if aRank == 30 {
+						bRank--
+					} else if bRankedIndex >= len(playersWGBR[aRank+1]) {
+						bRank--
+						bRankedIndex -= len(playersWGBR[aRank+1])
+					}
 				}
 				if bRank == aRank && bRankedIndex >= aRankedIndex {
 					bRankedIndex++
@@ -165,6 +172,7 @@ func main() {
 
 				aRanked, bRanked := playMatch(&players[aId], &players[bId])
 
+				//Move players in their ranks if they ranked or remove them if they're out of games
 				if players[aId].GamesLeft <= 0 {
 					if Debug {
 						log.Println("Removing", aId, "from lists")
@@ -225,7 +233,7 @@ func main() {
 						playersWGBR[bRank+1] = append(playersWGBR[bRank+1], bId)
 					}
 				}
-			} else {
+			} else { //We didn't find a match, ding a, and with enough dings, ragequit
 				players[aId].FailedMatchMaking++
 				if players[aId].FailedMatchMaking > FailedMatchMaking {
 					if Debug {
@@ -242,6 +250,7 @@ func main() {
 			}
 
 			if Debug {
+				//Ensure that our rank arrays have players with the right ranks. This is very slow
 				for r := 0; r < len(playersWGBR); r++ {
 					for i := 0; i < len(playersWGBR[r]); i++ {
 						if players[playersWGBR[r][i]].Rank != r {
