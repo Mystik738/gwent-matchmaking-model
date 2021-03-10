@@ -7,6 +7,7 @@ import (
 	"math"
 	"math/rand"
 	"os"
+	"sort"
 	"strconv"
 	"time"
 )
@@ -15,16 +16,17 @@ const (
 	//Substantial Model changes
 	Derank         = false //Allows players to de-rank on losses. Currently disabled in the game, but was part of older ranking systems
 	Learn          = true  //Allows players to learn as they play more games.
-	GamesPerSeason = 360   //Max, average will be half this. Number from https://forums.cdprojektred.com/index.php?threads/deep-analysis-of-journey-performed-by-game-director-himself.11028497/
+	GamesPerSeason = 360   //Max (+ SeasonalVariance), average will be half this. Number from https://forums.cdprojektred.com/index.php?threads/deep-analysis-of-journey-performed-by-game-director-himself.11028497/
 
 	//Minor Model changes. Note that these are not linear variables, so the descriptions aren't quite accurate.
 	SkillOffsetScale = 100 //How many games we expect the average player to learn the game. Set at 100 due to MMR requiring 100 games (25 per 4 factions) to mature, but anyone's guess.
 	LearnScale       = 2.0 //Allows some players to learn faster than others
 	LearnFactor      = 1.0 //Affects all players. Larger increases learning speed, but also increases the "just don't get it" factor for struggling players
+	SeasonalVariance = 100 //The maximum number of games play may change between seasons for players. Players randomly receive their own variance bounded by this.
 
 	//Procedural changes
 	Debug             = false
-	Seasons           = 12
+	Seasons           = 6
 	PlayersPerSeason  = 5000
 	FailedMatchMaking = 10 //Matchmaking attempts before a player ragequits the season, mostly to prevent small user pools from infinite loops
 )
@@ -37,6 +39,7 @@ type Player struct {
 	GamesLeft         int
 	GamesPlayed       int
 	GamesPerSeason    int
+	SeasonalVariance  int
 	FailedMatchMaking int
 	RankProgression   []RankProgression
 	Skill             Skill
@@ -48,24 +51,24 @@ type RankProgression struct {
 }
 
 type Skill struct {
-	max    float32
+	max    float64
 	offset int
-	rate   float32
-	calc   func(skill *Skill, gamesPlayed int) float32
+	rate   float64
+	Calc   func(skill *Skill, gamesPlayed int) float64
 }
 
-func calcSkill(skill *Skill, gamesPlayed int) float32 {
+func CalcSkill(skill *Skill, gamesPlayed int) float64 {
 	if Learn {
-		return skill.max * float32(.5+math.Atan(float64(gamesPlayed+skill.offset)/float64(skill.rate))/math.Pi)
+		return skill.max * float64(.5+math.Atan(float64(gamesPlayed+skill.offset)/float64(skill.rate))/math.Pi)
 	}
 	return skill.max
 }
 
-func NewPlayer(id int, skill float32, games int) Player {
+func NewPlayer(id int, skill float64, games int, variance int) Player {
 	player := Player{}
 	player.Id = id
-	player.GamesLeft = games
 	player.GamesPerSeason = games
+	player.SeasonalVariance = variance
 	player.Rank = 30
 	player.RankProgression = make([]RankProgression, 1)
 	for i := 30; i >= player.Rank; i-- {
@@ -73,10 +76,12 @@ func NewPlayer(id int, skill float32, games int) Player {
 	}
 
 	player.Skill = Skill{
-		max:    rand.Float32(),
-		offset: int((rand.Float32() - .5) * float32(SkillOffsetScale)),
-		rate:   float32(SkillOffsetScale / (1.0 + (rand.Float32() * (LearnScale - 1.0)))), //This looks complicated, but pins the learning rate to the skill offset rate
-		calc:   calcSkill}
+		max:    rand.Float64(),
+		offset: int((rand.Float64() - .5) * float64(SkillOffsetScale)),
+		rate:   float64(SkillOffsetScale / (1.0 + (rand.Float64() * (LearnScale - 1.0)))), //This looks complicated, but pins the learning rate to the skill offset rate
+		Calc:   CalcSkill}
+
+	setPlayerForSeason(&player, false)
 
 	return player
 }
@@ -85,10 +90,24 @@ func initPlayers(count int, gamesPlayed int, startId int) []Player {
 	players := make([]Player, count)
 
 	for i := 0; i < count; i++ {
-		players[i] = NewPlayer(i+startId, rand.Float32(), int(rand.Float32()*float32(gamesPlayed)))
+		players[i] = NewPlayer(i+startId, rand.Float64(), int(rand.Float64()*float64(gamesPlayed)), int(rand.Float64()*float64(SeasonalVariance)))
 	}
 
 	return players
+}
+
+func setPlayerForSeason(p *Player, resetRank bool) {
+	if resetRank {
+		if p.Rank < 28 {
+			p.Rank = p.Rank + 3
+		} else {
+			p.Rank = 30
+		}
+	}
+	p.GamesLeft = p.GamesPerSeason + int((rand.Float64()-0.5)*float64(p.SeasonalVariance))
+	if p.GamesLeft < 0 {
+		p.GamesLeft = 0
+	}
 }
 
 func main() {
@@ -105,21 +124,55 @@ func main() {
 		playersWithGames := make([]int, 0)
 		playersWGBR := make([][]int, 31)
 
+		//Get skill of top 500 Pro Rank
+		proPlayers := make([]*Player, 0)
 		for i := 0; i < len(players); i++ {
-			if s != 0 {
-				players[i].GamesLeft = players[i].GamesPerSeason
-				if players[i].Rank < 28 {
-					players[i].Rank = players[i].Rank + 3
-				} else {
-					players[i].Rank = 30
-				}
+			if players[i].Rank == 0 {
+				proPlayers = append(proPlayers, &players[i])
 			}
-			playersWithGames = append(playersWithGames, i)
-			playersWGBR[players[i].Rank] = append(playersWGBR[players[i].Rank], i)
 		}
 
+		//Find the cut for Pro Rank. This isn't fMMR, but gets the top skilled.
+		proCutOff := 0.0
+		if len(proPlayers) > 500 {
+			sort.Slice(proPlayers, func(i, j int) bool {
+				return proPlayers[i].Skill.Calc(&proPlayers[i].Skill, proPlayers[i].GamesPlayed) > proPlayers[j].Skill.Calc(&proPlayers[j].Skill, proPlayers[j].GamesPlayed)
+			})
+
+			proCutOff = proPlayers[499].Skill.Calc(&proPlayers[499].Skill, proPlayers[499].GamesPlayed)
+		}
+
+		if Debug {
+			log.Println("ProRank skill cutoff:", proCutOff)
+		}
+
+		playersSittingOut := 0
+		for i := 0; i < len(players); i++ {
+			if s != 0 {
+				//If players are in the Pro Rank Top 500, don't derank. Hell, don't even play them for efficiency, just grant then their games
+				if players[i].Rank == 0 && proCutOff < players[i].Skill.Calc(&players[i].Skill, players[i].GamesPlayed) {
+					setPlayerForSeason(&players[i], false)
+					players[i].GamesPlayed += players[i].GamesLeft
+					players[i].GamesLeft = 0
+				} else {
+					setPlayerForSeason(&players[i], true)
+				}
+			}
+			if players[i].GamesLeft > 0 {
+				playersWithGames = append(playersWithGames, i)
+				playersWGBR[players[i].Rank] = append(playersWGBR[players[i].Rank], i)
+			} else {
+				playersSittingOut++
+			}
+		}
+
+		if Debug {
+			log.Println(playersSittingOut, "players are sitting out this season.")
+		}
+
+		//Start playing games
 		for len(playersWithGames) > 1 {
-			aGamesIndex := int(rand.Float32() * float32(len(playersWithGames)))
+			aGamesIndex := int(rand.Float64() * float64(len(playersWithGames)))
 			aId := playersWithGames[aGamesIndex]
 			aRank := players[aId].Rank
 
@@ -148,7 +201,7 @@ func main() {
 			}
 			//If we matched, find a player and play
 			if numMatched > 0 {
-				bRankedIndex := int(rand.Float32() * float32(numMatched))
+				bRankedIndex := int(rand.Float64() * float64(numMatched))
 				bRank := aRank
 				if len(playersWGBR[aRank])-1 == 0 {
 					bRank = aRank + 1
@@ -187,7 +240,16 @@ func main() {
 					playersWGBR[aRank][aRankedIndex] = playersWGBR[aRank][len(playersWGBR[aRank])-1]
 					playersWGBR[aRank] = playersWGBR[aRank][:len(playersWGBR[aRank])-1]
 
-					playersWGBR[aRank-1] = append(playersWGBR[aRank-1], aId)
+					if aRank-1 != 0 {
+						playersWGBR[aRank-1] = append(playersWGBR[aRank-1], aId)
+					} else {
+						//ProRank players don't need to progress in this model, just grant them their games
+						players[aId].GamesPlayed += players[aId].GamesLeft
+						players[aId].GamesLeft = 0
+
+						playersWithGames[aGamesIndex] = playersWithGames[len(playersWithGames)-1]
+						playersWithGames = playersWithGames[:len(playersWithGames)-1]
+					}
 				} else if aRanked == -1 {
 					playersWGBR[aRank][aRankedIndex] = playersWGBR[aRank][len(playersWGBR[aRank])-1]
 					playersWGBR[aRank] = playersWGBR[aRank][:len(playersWGBR[aRank])-1]
@@ -225,7 +287,16 @@ func main() {
 						playersWGBR[bRank][bRankedIndex] = playersWGBR[bRank][len(playersWGBR[bRank])-1]
 						playersWGBR[bRank] = playersWGBR[bRank][:len(playersWGBR[bRank])-1]
 
-						playersWGBR[bRank-1] = append(playersWGBR[bRank-1], bId)
+						if bRank-1 != 0 {
+							playersWGBR[bRank-1] = append(playersWGBR[bRank-1], bId)
+						} else {
+							//ProRank players don't need to progress in this model, just grant them their games
+							players[bId].GamesPlayed += players[bId].GamesLeft
+							players[bId].GamesLeft = 0
+
+							playersWithGames[bGamesIndex] = playersWithGames[len(playersWithGames)-1]
+							playersWithGames = playersWithGames[:len(playersWithGames)-1]
+						}
 					} else if bRanked == -1 {
 						playersWGBR[bRank][bRankedIndex] = playersWGBR[bRank][len(playersWGBR[bRank])-1]
 						playersWGBR[bRank] = playersWGBR[bRank][:len(playersWGBR[bRank])-1]
@@ -298,7 +369,7 @@ func endStats(p *[]Player, season int) {
 
 	for r := 0; r < len(playersBR); r++ {
 		gp := 0
-		skill := (float32)(0.0)
+		skill := (float64)(0.0)
 		gpAll := 0
 		cnt := len(playersBR[r])
 		cntAll := 0
@@ -306,15 +377,15 @@ func endStats(p *[]Player, season int) {
 		for i := 0; i < cnt; i++ {
 			gp += (*p)[playersBR[r][i]].GamesPlayed
 			pSkill := &(*p)[playersBR[r][i]].Skill
-			skill += (*p)[playersBR[r][i]].Skill.calc(pSkill, (*p)[playersBR[r][i]].GamesPlayed)
+			skill += (*p)[playersBR[r][i]].Skill.Calc(pSkill, (*p)[playersBR[r][i]].GamesPlayed)
 		}
 
-		avg := skill / (float32)(cnt)
+		avg := skill / (float64)(cnt)
 
 		stddev := 0.0
 		for i := 0; i < cnt; i++ {
 			pSkill := &(*p)[playersBR[r][i]].Skill
-			stddev += math.Pow(float64((*p)[playersBR[r][i]].Skill.calc(pSkill, (*p)[playersBR[r][i]].GamesPlayed)-avg), 2)
+			stddev += math.Pow(float64((*p)[playersBR[r][i]].Skill.Calc(pSkill, (*p)[playersBR[r][i]].GamesPlayed)-avg), 2)
 		}
 		stddev = math.Sqrt(stddev / float64(cnt))
 
@@ -328,7 +399,7 @@ func endStats(p *[]Player, season int) {
 		if cnt > 0 {
 			log.Println("Rank", r, "Players:", cnt, "GamesPlayed:", gp/cnt, "Skill:", avg, "GamesToProgress:", (gp+gpAll)/(cnt+cntAll))
 
-			err := writer.Write([]string{strconv.Itoa(r), strconv.Itoa(cnt), fmt.Sprintf("%f", float32(gp)/float32(cnt)), fmt.Sprintf("%f", avg), fmt.Sprintf("%f", stddev), fmt.Sprintf("%f", float32(gp+gpAll)/float32(cnt+cntAll))})
+			err := writer.Write([]string{strconv.Itoa(r), strconv.Itoa(cnt), fmt.Sprintf("%f", float64(gp)/float64(cnt)), fmt.Sprintf("%f", avg), fmt.Sprintf("%f", stddev), fmt.Sprintf("%f", float64(gp+gpAll)/float64(cnt+cntAll))})
 			checkError("Cannot write to file", err)
 		} else {
 			log.Println("Rank", r, "Players: 0 GamesPlayed: 0 Skill: n/a GamesToProgress: n/a")
@@ -339,15 +410,15 @@ func endStats(p *[]Player, season int) {
 func playMatch(a *Player, b *Player) (int, int) {
 	aSkill := &a.Skill
 	bSkill := &b.Skill
-	match := rand.Float32() * (a.Skill.calc(aSkill, a.GamesPlayed) + b.Skill.calc(bSkill, b.GamesPlayed))
+	match := rand.Float64() * (a.Skill.Calc(aSkill, a.GamesPlayed) + b.Skill.Calc(bSkill, b.GamesPlayed))
 	aRankedUp := 0
 	bRankedUp := 0
 
 	matchOutcome := 0
 
-	if match < a.Skill.calc(aSkill, a.GamesPlayed) {
+	if match < a.Skill.Calc(aSkill, a.GamesPlayed) {
 		matchOutcome = -1
-	} else if match > a.Skill.calc(aSkill, a.GamesPlayed) {
+	} else if match > a.Skill.Calc(aSkill, a.GamesPlayed) {
 		matchOutcome = 1
 	}
 
@@ -423,7 +494,8 @@ func addLoss(player *Player) (bool, int) {
 		if player.Pieces > 0 {
 			player.Pieces--
 		} else {
-			if Derank {
+			//Can't derank due to loss in ProRank, just lose MMR
+			if Derank && player.Rank != 0 {
 				player.Pieces += 5
 				player.Rank++
 				rankedDown = -1
