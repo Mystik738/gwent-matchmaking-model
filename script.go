@@ -19,15 +19,16 @@ const (
 	GamesPerSeason = 360   //Max (+ SeasonalVariance), average will be half this. Number from https://forums.cdprojektred.com/index.php?threads/deep-analysis-of-journey-performed-by-game-director-himself.11028497/
 
 	//Minor Model changes. Note that these are not linear variables, so the descriptions aren't quite accurate.
-	SkillOffsetScale = 100 //How many games we expect the average player to learn the game. Set at 100 due to MMR requiring 100 games (25 per 4 factions) to mature, but anyone's guess.
+	PlayersPerSeason = 10000
+	SkillOffsetScale = 100 //How many games we expect the average player to learn most of the game. Set at 100 due to MMR requiring 100 games (25 per 4 factions) to mature, but anyone's guess.
 	LearnScale       = 2.0 //Allows some players to learn faster than others
 	LearnFactor      = 1.0 //Affects all players. Larger increases learning speed, but also increases the "just don't get it" factor for struggling players
 	SeasonalVariance = 100 //The maximum number of games play may change between seasons for players. Players randomly receive their own variance bounded by this.
+	SkillWinWeight   = 0.0 //At zero, weights wins to a/(a+b) where a and b are player skills (i.e. a .9 and .1 player would win against each other 90% and 10% of the time, respectively). At 1, the higher skilled player always wins.
 
 	//Procedural changes
 	Debug             = false
-	Seasons           = 6
-	PlayersPerSeason  = 5000
+	Seasons           = 12
 	FailedMatchMaking = 10 //Matchmaking attempts before a player ragequits the season, mostly to prevent small user pools from infinite loops
 )
 
@@ -410,12 +411,12 @@ func endStats(p *[]Player, season int) {
 func playMatch(a *Player, b *Player) (int, int) {
 	aSkill := &a.Skill
 	bSkill := &b.Skill
-	match := rand.Float64() * (a.Skill.Calc(aSkill, a.GamesPlayed) + b.Skill.Calc(bSkill, b.GamesPlayed))
 	aRankedUp := 0
 	bRankedUp := 0
 
 	matchOutcome := 0
 
+	match := SkillWinWeight*0.5 + (1.0-SkillWinWeight)*rand.Float64()*(a.Skill.Calc(aSkill, a.GamesPlayed)+b.Skill.Calc(bSkill, b.GamesPlayed))
 	if match < a.Skill.Calc(aSkill, a.GamesPlayed) {
 		matchOutcome = -1
 	} else if match > a.Skill.Calc(aSkill, a.GamesPlayed) {
