@@ -14,21 +14,22 @@ import (
 
 const (
 	//Substantial Model changes
-	Derank         = false //Allows players to de-rank on losses. Currently disabled in the game, but was part of older ranking systems
-	Learn          = true  //Allows players to learn as they play more games.
-	GamesPerSeason = 360   //Max (+ SeasonalVariance), average will be half this. Number from https://forums.cdprojektred.com/index.php?threads/deep-analysis-of-journey-performed-by-game-director-himself.11028497/
+	Derank         = false //Allows players to de-rank on losses. Currently disabled in the game, but was part of older ranking systems.
+	GamesPerSeason = 360   //Max (+ SeasonalVariance/2), average will be half this. Average number from https://forums.cdprojektred.com/index.php?threads/deep-analysis-of-journey-performed-by-game-director-himself.11028497/
+	Learn          = false //Allows players to learn as they play more games.
 
-	//Minor Model changes. Note that these are not linear variables, so the descriptions aren't quite accurate.
-	PlayersPerSeason = 10000
-	SkillOffsetScale = 100 //How many games we expect the average player to learn most of the game. Set at 100 due to MMR requiring 100 games (25 per 4 factions) to mature, but anyone's guess.
-	LearnScale       = 2.0 //Allows some players to learn faster than others
-	LearnFactor      = 1.0 //Affects all players. Larger increases learning speed, but also increases the "just don't get it" factor for struggling players
-	SeasonalVariance = 100 //The maximum number of games play may change between seasons for players. Players randomly receive their own variance bounded by this.
-	SkillWinWeight   = 0.0 //At zero, weights wins to a/(a+b) where a and b are player skills (i.e. a .9 and .1 player would win against each other 90% and 10% of the time, respectively). At 1, the higher skilled player always wins.
+	//Minor Model changes. Note that these are not always linear variables.
+	LearnFactor      = 1.0   //Affects all players. Alters slope of sigmoid by same rate for all players. Larger increases learning speed, but also increases the "just don't get it" factor for struggling players.
+	LearnScale       = 2.0   //Allows some players to learn faster than others. Alters slope of sigmoid by different rates. Should be > 0.0
+	InverseLearning  = false //If players lose skill for every game played. Non-real world.
+	PlayersPerSeason = 1000  //Number of new players added each season.
+	Seasons          = 12    //Number of seasons in which to run the simulation.
+	SeasonalVariance = 360   //The change in maximum number of games played between seasons for players. Range is set at [-SV/2, SV/2]. Players randomly receive their own variance bounded by this. No source on this number.
+	SkillOffsetScale = 100   //How many games we expect the average player to learn most of the game. Set at 100 due to MMR requiring 100 games (25 per 4 factions) to mature, but anyone's guess.
+	SkillWinWeight   = 0.0   //At zero, weights wins to a/(a+b) where a and b are player skills (i.e. a .9 and .1 player would win against each other 90% and 10% of the time, respectively). At 1, the higher skilled player always wins.
 
 	//Procedural changes
 	Debug             = false
-	Seasons           = 12
 	FailedMatchMaking = 10 //Matchmaking attempts before a player ragequits the season, mostly to prevent small user pools from infinite loops
 )
 
@@ -60,7 +61,10 @@ type Skill struct {
 
 func CalcSkill(skill *Skill, gamesPlayed int) float64 {
 	if Learn {
-		return skill.max * float64(.5+math.Atan(float64(gamesPlayed+skill.offset)/float64(skill.rate))/math.Pi)
+		if !InverseLearning {
+			return skill.max * float64(.5+math.Atan(float64(gamesPlayed+skill.offset)/float64(skill.rate))/math.Pi)
+		}
+		return skill.max * float64(.5-math.Atan(float64(gamesPlayed+skill.offset)/float64(skill.rate))/math.Pi)
 	}
 	return skill.max
 }
@@ -79,7 +83,7 @@ func NewPlayer(id int, skill float64, games int, variance int) Player {
 	player.Skill = Skill{
 		max:    rand.Float64(),
 		offset: int((rand.Float64() - .5) * float64(SkillOffsetScale)),
-		rate:   float64(SkillOffsetScale / (1.0 + (rand.Float64() * (LearnScale - 1.0)))), //This looks complicated, but pins the learning rate to the skill offset rate
+		rate:   float64(SkillOffsetScale * LearnFactor / (1.0 + (rand.Float64() * (LearnScale - 1.0)))), //This looks complicated, but pins the learning rate to the skill offset rate
 		Calc:   CalcSkill}
 
 	setPlayerForSeason(&player, false)
@@ -115,7 +119,7 @@ func main() {
 	log.SetOutput(os.Stderr)
 	rand.Seed(time.Now().UnixNano())
 
-	log.Println("Playing", Seasons, "season(s), adding", PlayersPerSeason, "each season with an average", GamesPerSeason/2, "games played per season.")
+	log.Println("Playing", Seasons, "season(s), adding", PlayersPerSeason, "players each season with an average", GamesPerSeason/2, "games played per season.")
 
 	players := make([]Player, 0)
 
@@ -398,12 +402,16 @@ func endStats(p *[]Player, season int) {
 		}
 
 		if cnt > 0 {
-			log.Println("Rank", r, "Players:", cnt, "GamesPlayed:", gp/cnt, "Skill:", avg, "GamesToProgress:", (gp+gpAll)/(cnt+cntAll))
+			if r > 0 {
+				log.Println("Rank", r, "\tPlayers:", cnt, "\tGamesPlayed:", gp/cnt, "\tSkill:", avg, "\tStdDev:", stddev, "\tGamesToProgressPastRank:", (gp+gpAll)/(cnt+cntAll))
+			} else {
+				log.Println("Rank", r, "\tPlayers:", cnt, "\tGamesPlayed:", gp/cnt, "\tSkill:", avg, "\tStdDev:", stddev)
+			}
 
 			err := writer.Write([]string{strconv.Itoa(r), strconv.Itoa(cnt), fmt.Sprintf("%f", float64(gp)/float64(cnt)), fmt.Sprintf("%f", avg), fmt.Sprintf("%f", stddev), fmt.Sprintf("%f", float64(gp+gpAll)/float64(cnt+cntAll))})
 			checkError("Cannot write to file", err)
 		} else {
-			log.Println("Rank", r, "Players: 0 GamesPlayed: 0 Skill: n/a GamesToProgress: n/a")
+			log.Println("Rank", r, "\tPlayers: 0 \tGamesPlayed: 0 \tSkill: n/a \tStdDev: n/a \tGamesToProgress: n/a")
 		}
 	}
 }
